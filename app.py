@@ -37,6 +37,8 @@ if uploaded:
 import glob
 db_files = sorted(glob.glob("timeseries_*.db"))
 selected_db = st.sidebar.selectbox("Select Dataset (DB)", options=(db_files if db_files else ["(no DBs found)"]))
+selected_db = str(selected_db) if selected_db else ""
+valid_db_selected = (selected_db.endswith('.db') and selected_db in db_files)
 
 SITE_CHOICES = [
     "武芸川地区シミュレーション (一次)",
@@ -93,7 +95,11 @@ band_width = st.number_input(
 
 # --- Query & Plot ---
 try:
-    rows = query_timeseries(query_site, str(q_start), str(q_end), db_path=selected_db if isinstance(selected_db, str) and selected_db.endswith('.db') else None)
+    if not valid_db_selected:
+    st.warning('No valid DB selected. Please ingest the Excel and choose a DB from the sidebar.')
+    rows = []
+else:
+    rows = query_timeseries(query_site, str(q_start), str(q_end), db_path=selected_db)
 except sqlite3.OperationalError as e:
     st.error("Database schema error. Click **Init DB** or **Reset DB**, then ingest the Excel again.")
     st.code(str(e))
