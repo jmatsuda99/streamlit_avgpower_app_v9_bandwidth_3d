@@ -14,6 +14,38 @@ st.title("Average Power (30-min) Viewer")
 # --- Sidebar: Upload & Ingest ALL ---
 st.sidebar.header("Data Ingest")
 uploaded = st.sidebar.file_uploader("Upload Excel (.xlsx)", type=["xlsx"])
+# === Multi-DB: ingest 4 target sheets into separate DBs and select DB ===
+st.sidebar.markdown("---")
+st.sidebar.subheader("Datasets (per-sheet DB)")
+
+if uploaded:
+    if st.sidebar.button("Ingest to 4 DBs (per sheet)"):
+        try:
+            tmp_xlsx = Path("uploaded.xlsx")
+            with open(tmp_xlsx, "wb") as f:
+                f.write(uploaded.getbuffer())
+            from data_ingest import ingest_excel_to_separate_dbs
+            created = ingest_excel_to_separate_dbs(str(tmp_xlsx), ".")
+            st.sidebar.success(f"Ingested into {len(created)} DBs.")
+            if created:
+                st.sidebar.write("Created:")
+                for p in created:
+                    st.sidebar.code(Path(p).name)
+        except Exception as e:
+            st.sidebar.error(f"Ingest error: {e}")
+
+import glob
+db_files = sorted(glob.glob("timeseries_*.db"))
+selected_db = st.sidebar.selectbox("Select Dataset (DB)", options=(db_files if db_files else ["(no DBs found)"]))
+
+SITE_CHOICES = [
+    "武芸川地区シミュレーション (一次)",
+    "極楽寺シミュレーション (一次)",
+    "笠神地区シミュレーション (一次)",
+    "土岐地区地区シミュレーション (一次)",
+]
+query_site = st.sidebar.selectbox("Site (Sheet)", options=SITE_CHOICES)
+
 
 # DB controls
 colA, colB = st.sidebar.columns(2)
@@ -61,7 +93,7 @@ band_width = st.number_input(
 
 # --- Query & Plot ---
 try:
-    rows = query_timeseries(query_site, str(q_start), str(q_end))
+    rows = query_timeseries(query_site, str(q_start), str(q_end), db_path=selected_db if isinstance(selected_db, str) and selected_db.endswith('.db') else None)
 except sqlite3.OperationalError as e:
     st.error("Database schema error. Click **Init DB** or **Reset DB**, then ingest the Excel again.")
     st.code(str(e))
@@ -121,93 +153,3 @@ else:
 
 st.markdown("---")
 st.caption("Yellow accepted background + lightblue ±band band (user-set). English titles; robust DB; ALL-sheets ingest; 30-min kWh→kW; 3h average forward-filled.")
-
-# --- 3D View (Experimental) ---
-st.markdown("---")
-st.subheader("3D View (Experimental)")
-
-enable_3d = st.checkbox("Enable 3D visualization", value=False, help="Plotly interactive 3D view (rotate, zoom with mouse)")
-
-if enable_3d:
-    try:
-        import plotly.graph_objects as go
-        import numpy as np
-        import math
-
-        if 'df' not in locals():
-            st.warning("No plotted data available yet. Please run a query above to load data.")
-        else:
-            df3 = df.copy().reset_index().rename(columns={"ts": "timestamp"})
-            df3['date'] = pd.to_datetime(df3['timestamp']).dt.date
-            df3['time_minutes'] = pd.to_datetime(df3['timestamp']).dt.hour * 60 + pd.to_datetime(df3['timestamp']).dt.minute
-
-            # Sort and build date index mapping (for X axis)
-            dates_sorted = sorted(df3['date'].unique())
-            date_to_idx = {d:i for i,d in enumerate(dates_sorted)}
-            df3['date_idx'] = df3['date'].map(date_to_idx)
-
-            # === UI controls ===
-            xlabel = "Date"
-            ylabel = "Time of Day (min)"
-            z_option = st.selectbox(
-                "Z-axis (kW) value",
-                ["consumption_kW", "avg_kW_filled"],
-                index=0,
-                help="Select which metric to display as kW (depth)."
-            )
-            plot_type = st.radio(
-                "Plot type",
-                ["Lines by day"],
-                index=0,
-                horizontal=True
-            )
-
-            st.markdown("**Camera (viewpoint) controls**")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                az_deg = st.slider("Azimuth (°)", 0, 360, 45, step=5,
-                                   help="Rotate around the vertical axis.")
-            with col2:
-                elev = st.slider("Elevation (Y eye)", 0.2, 3.0, 1.2, step=0.1,
-                                 help="Height of the camera eye (along Y).")
-            with col3:
-                radius = st.slider("Radius", 0.5, 4.0, 2.0, step=0.1,
-                                   help="Distance from the center.")
-
-            # Compute camera eye from azimuth, radius, elevation
-            theta = math.radians(az_deg)
-            eye = dict(x=radius*math.cos(theta), y=elev, z=radius*math.sin(theta))
-            camera = dict(eye=eye, up=dict(x=0, y=1, z=0))
-
-            # Lines by day: for each date, draw a 3D line along time (Y) with kW as Z and date index as X
-            fig = go.Figure()
-            for d in dates_sorted:
-                dsub = df3[df3['date'] == d].sort_values('time_minutes')
-                fig.add_trace(go.Scatter3d(
-                    x=dsub['date_idx'],              # X: date index (横)
-                    y=dsub['time_minutes'],          # Y: time minutes (高さ)
-                    z=dsub[z_option],                # Z: kW (奥行)
-                    mode='lines',
-                    name=str(d),
-                    line=dict(width=3)
-                ))
-            fig.update_layout(
-                scene=dict(
-                    xaxis=dict(
-                        title=xlabel,
-                        tickmode='array',
-                        tickvals=list(range(len(dates_sorted))),
-                        ticktext=[str(d) for d in dates_sorted]
-                    ),
-                    yaxis_title=ylabel,
-                    zaxis_title=f"{z_option} (kW)",
-                ),
-                height=780,
-                margin=dict(l=0,r=0,b=0,t=30),
-                title=f"{query_site} - 3D Lines (X=date, Y=time, Z={z_option} kW)",
-                scene_camera=camera
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-    except Exception as e:
-        st.error(f"3D rendering error: {e}")
