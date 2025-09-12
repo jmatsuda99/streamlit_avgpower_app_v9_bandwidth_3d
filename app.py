@@ -141,22 +141,23 @@ if enable_3d:
             df3['date'] = pd.to_datetime(df3['timestamp']).dt.date
             df3['time_minutes'] = pd.to_datetime(df3['timestamp']).dt.hour * 60 + pd.to_datetime(df3['timestamp']).dt.minute
 
-            # Sort and build date index mapping (for Y axis)
+            # Sort and build date index mapping (for X axis)
             dates_sorted = sorted(df3['date'].unique())
             date_to_idx = {d:i for i,d in enumerate(dates_sorted)}
             df3['date_idx'] = df3['date'].map(date_to_idx)
 
             # === UI controls ===
-            ylabel = "Date"
-            z_option = st.selectbox(
-                "Z-axis (kW) value",
+            xlabel = "Date"
+            zlabel = "Time of Day (min)"
+            y_option = st.selectbox(
+                "Y-axis (kW) value",
                 ["consumption_kW", "avg_kW_filled"],
                 index=0,
-                help="Select which metric to display as height (kW)."
+                help="Select which metric to display as kW (depth)."
             )
             plot_type = st.radio(
                 "Plot type",
-                ["Lines by day", "Surface (time × date)"],
+                ["Lines by day"],
                 index=0,
                 horizontal=True
             )
@@ -165,7 +166,7 @@ if enable_3d:
             col1, col2, col3 = st.columns(3)
             with col1:
                 az_deg = st.slider("Azimuth (°)", 0, 360, 45, step=5,
-                                   help="Rotate around the vertical axis (Y).")
+                                   help="Rotate around the vertical axis.")
             with col2:
                 elev = st.slider("Elevation (Z eye)", 0.2, 3.0, 1.2, step=0.1,
                                  help="Height of the camera eye.")
@@ -178,66 +179,38 @@ if enable_3d:
             eye = dict(x=radius*math.cos(theta), y=radius*math.sin(theta), z=elev)
             camera = dict(eye=eye, up=dict(x=0, y=0, z=1))
 
-            if plot_type == "Lines by day":
-                fig = go.Figure()
-                for d in dates_sorted:
-                    dsub = df3[df3['date'] == d].sort_values('time_minutes')
-                    fig.add_trace(go.Scatter3d(
-                        x=dsub['time_minutes'],          # X: time of day (min)
-                        y=dsub['date_idx'],              # Y: date index
-                        z=dsub[z_option],                # Z: kW
-                        mode='lines',
-                        name=str(d),
-                        line=dict(width=3)
-                    ))
-                fig.update_layout(
-                    scene=dict(
-                        xaxis_title="Time of Day (min)",
-                        yaxis=dict(
-                            title=ylabel,
-                            tickmode='array',
-                            tickvals=list(range(len(dates_sorted))),
-                            ticktext=[str(d) for d in dates_sorted]
-                        ),
-                        zaxis_title=f"{z_option} (kW)",
+            # Lines by day: for each date, draw a 3D line along time (Z) with kW as Y and date index as X
+            fig = go.Figure()
+            for d in dates_sorted:
+                dsub = df3[df3['date'] == d].sort_values('time_minutes')
+                fig.add_trace(go.Scatter3d(
+                    x=dsub['date_idx'],              # X: date index
+                    y=dsub[y_option],                # Y: kW
+                    z=dsub['time_minutes'],          # Z: time minutes (height)
+                    mode='lines',
+                    name=str(d),
+                    line=dict(width=3)
+                ))
+            fig.update_layout(
+                scene=dict(
+                    xaxis=dict(
+                        title=xlabel,
+                        tickmode='array',
+                        tickvals=list(range(len(dates_sorted))),
+                        ticktext=[str(d) for d in dates_sorted]
                     ),
-                    height=750,
-                    margin=dict(l=0,r=0,b=0,t=30),
-                    title=f"{query_site} - 3D Lines (Z={z_option}, X=time, Y=date)",
-                    scene_camera=camera
-                )
-                st.plotly_chart(fig, use_container_width=True)
+                    yaxis_title=f"{y_option} (kW)",
+                    zaxis_title=zlabel,
+                ),
+                height=780,
+                margin=dict(l=0,r=0,b=0,t=30),
+                title=f"{query_site} - 3D Lines (X=date, Y={y_option} kW, Z=time)",
+                scene_camera=camera
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
-            else:
-                # Surface: rows = date_idx (Y), cols = time_minutes (X)
-                pivot = df3.pivot_table(index='date_idx', columns='time_minutes', values=z_option, aggfunc='mean')
-                pivot = pivot.sort_index(axis=0).sort_index(axis=1)
-                # Interpolate along time, then along date index to form a dense grid
-                pivot = pivot.interpolate(method='linear', axis=1).interpolate(method='linear', axis=0)
-                pivot = pivot.fillna(method='bfill', axis=1).fillna(method='ffill', axis=1).fillna(method='bfill', axis=0).fillna(method='ffill', axis=0)
-
-                X = pivot.columns.values        # time minutes
-                Y = pivot.index.values          # date indices
-                Z = pivot.values                # kW values
-
-                figsurf = go.Figure(data=[go.Surface(x=X, y=Y, z=Z)])
-                figsurf.update_layout(
-                    scene=dict(
-                        xaxis_title="Time of Day (min)",
-                        yaxis=dict(
-                            title=ylabel,
-                            tickmode='array',
-                            tickvals=list(range(len(dates_sorted))),
-                            ticktext=[str(d) for d in dates_sorted]
-                        ),
-                        zaxis_title=f"{z_option} (kW)"
-                    ),
-                    height=800,
-                    margin=dict(l=0,r=0,b=0,t=30),
-                    title=f"{query_site} - 3D Surface (Z={z_option}, X=time, Y=date)",
-                    scene_camera=camera
-                )
-                st.plotly_chart(figsurf, use_container_width=True)
+            # Note: A true 3D surface with Z=time is ill-posed (multiple kW per time). Lines are most faithful for this axis mapping.
+            st.info("Surface rendering is not provided for this axis mapping (Z = time). Lines-by-day best represents the data without inverting the time→kW relation.")
 
     except Exception as e:
         st.error(f"3D rendering error: {e}")
