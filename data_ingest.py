@@ -184,8 +184,27 @@ def slugify(name: str):
     return s.strip("_")
 
 def ingest_excel_to_separate_dbs(xlsx_path: str, out_dir: str, _unused=None):
-    from db import reset_db, insert_rows
+    """
+    Read TARGET_SHEETS and create one SQLite DB each under out_dir.
+    This function does NOT import from db to avoid import errors; it uses sqlite3 directly.
+    """
+    SCHEMA = """
+    CREATE TABLE IF NOT EXISTS timeseries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        site TEXT NOT NULL,
+        ts TEXT NOT NULL,
+        consumption_kWh REAL,
+        generation_kWh REAL,
+        surplus_kWh REAL,
+        price REAL,
+        avg_consumption_kWh REAL,
+        final_bid_ok TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_ts ON timeseries(ts);
+    CREATE INDEX IF NOT EXISTS idx_site_ts ON timeseries(site, ts);
+    """
     created = []
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
     for sh in TARGET_SHEETS:
         try:
             df = _read_timeseries_table(xlsx_path, sh)
@@ -195,7 +214,14 @@ def ingest_excel_to_separate_dbs(xlsx_path: str, out_dir: str, _unused=None):
             continue
         db_name = f"timeseries_{slugify(sh)}.db"
         db_path = str(Path(out_dir) / db_name)
-        reset_db(db_path)
-        insert_rows(rows, db_path)
+        # Write rows using sqlite3 directly
+        with sqlite3.connect(db_path) as conn:
+            conn.executescript(SCHEMA)
+            conn.executemany("""
+                INSERT INTO timeseries
+                (site, ts, consumption_kWh, generation_kWh, surplus_kWh, price, avg_consumption_kWh, final_bid_ok)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, rows)
+            conn.commit()
         created.append(db_path)
     return created
