@@ -96,10 +96,10 @@ band_width = st.number_input(
 # --- Query & Plot ---
 try:
     if not valid_db_selected:
-    st.warning('No valid DB selected. Please ingest the Excel and choose a DB from the sidebar.')
-    rows = []
-else:
-    rows = query_timeseries(query_site, str(q_start), str(q_end), db_path=selected_db)
+        st.warning('No valid DB selected. Please ingest the Excel and choose a DB from the sidebar.')
+        rows = []
+    else:
+        rows = query_timeseries(query_site, str(q_start), str(q_end), db_path=selected_db)
 except sqlite3.OperationalError as e:
     st.error("Database schema error. Click **Init DB** or **Reset DB**, then ingest the Excel again.")
     st.code(str(e))
