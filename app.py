@@ -1,0 +1,226 @@
+
+import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
+import sqlite3
+
+from db import init_db, reset_db, query_timeseries
+from data_ingest import ingest_all_sheets
+
+st.set_page_config(page_title="Average Power (kW) Viewer", layout="wide")
+st.title("Average Power (30-min) Viewer")
+
+# --- Sidebar: Upload & Ingest ALL ---
+st.sidebar.header("Data Ingest")
+uploaded = st.sidebar.file_uploader("Upload Excel (.xlsx)", type=["xlsx"])
+
+# DB controls
+colA, colB = st.sidebar.columns(2)
+with colA:
+    if st.button("Init DB"):
+        init_db()
+        st.success("DB initialized (tables ensured).")
+with colB:
+    if st.button("Reset DB (Drop & Recreate)"):
+        reset_db()
+        st.warning("DB reset. Please ingest again.")
+
+if uploaded:
+    tmp_path = f"/tmp/{uploaded.name}"
+    with open(tmp_path, "wb") as f:
+        f.write(uploaded.getbuffer())
+
+    if st.sidebar.button("Ingest ALL Sheets into DB"):
+        init_db()
+        n = ingest_all_sheets(tmp_path)
+        st.sidebar.success(f"Ingested/updated {n} rows from ALL sheets.")
+
+# --- Plot options ---
+st.header("Plot")
+query_site = st.text_input("Site", value="武芸川")
+col1, col2 = st.columns(2)
+with col1:
+    q_start = st.date_input("Start Date", value=datetime(2024,7,1))
+with col2:
+    q_end = st.date_input("End Date (exclusive)", value=datetime(2024,7,2))
+
+show_consumption = st.checkbox("Show Consumption (kW)", value=True)
+show_avg = st.checkbox("Show Average (kW, filled)", value=True)
+show_accept_bg = st.checkbox('Highlight "Accepted" (最終入札可否=〇) blocks', value=True)
+show_avg_band = st.checkbox("Show band between Average ±X kW (inside accepted blocks)", value=True)
+
+# Band width (kW), step = 100 kW, default = 1000 kW
+band_width = st.number_input(
+    "± Band width (kW)",
+    min_value=100,
+    max_value=10000,
+    step=100,
+    value=1000
+)
+
+# --- Query & Plot ---
+try:
+    rows = query_timeseries(query_site, str(q_start), str(q_end))
+except sqlite3.OperationalError as e:
+    st.error("Database schema error. Click **Init DB** or **Reset DB**, then ingest the Excel again.")
+    st.code(str(e))
+    rows = []
+
+df = pd.DataFrame(rows, columns=["ts", "consumption_kWh", "generation_kWh", "surplus_kWh", "price", "avg_consumption_kWh", "final_bid_ok"])
+
+if df.empty:
+    st.info("No data found in DB for the selected site/range. Ingest the Excel first or adjust the filters.")
+else:
+    df["ts"] = pd.to_datetime(df["ts"]).sort_values()
+
+    # kWh(30-min) -> kW
+    df["consumption_kW"] = df["consumption_kWh"] * 2.0
+    df["avg_kW_raw"] = df["avg_consumption_kWh"] * 2.0
+
+    # Forward-fill the 3-hourly average across 30-min slots
+    df = df.set_index("ts").asfreq("30min")
+    df["avg_kW_filled"] = df["avg_kW_raw"].ffill()
+
+    # Plot (English title)
+    fig = plt.figure(figsize=(12,6))
+    ax = plt.gca()
+
+    # Background for accepted blocks and ±band width band
+    if show_accept_bg:
+        accept_mask = df["final_bid_ok"].astype(str) == "〇"
+        for t in df.index[accept_mask]:
+            ax.axvspan(t, t + pd.Timedelta(minutes=30), alpha=0.25, color="yellow")
+            if show_avg_band and not pd.isna(df.loc[t, "avg_kW_filled"]):
+                m = df.loc[t, "avg_kW_filled"]
+                ax.fill_between(
+                    [t, t + pd.Timedelta(minutes=30)],
+                    [m - band_width, m - band_width],
+                    [m + band_width, m + band_width],
+                    alpha=0.25,
+                    color="lightblue"
+                )
+
+    if show_consumption:
+        ax.plot(df.index, df["consumption_kW"], marker="o", linestyle="-", label="Consumption (kW)")
+    if show_avg:
+        ax.plot(df.index, df["avg_kW_filled"], marker="s", linestyle="--", label="Average Power (kW, filled)")
+
+    ax.set_title(f"{query_site} - Power Consumption (kW)")
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Power (kW)")
+    ax.legend()
+    st.pyplot(fig)
+
+    st.download_button(
+        "Download Plotted Data (CSV)",
+        data=df[["consumption_kW", "avg_kW_filled", "final_bid_ok"]].to_csv(index=True).encode("utf-8"),
+        file_name=f"{query_site}_{q_start}_{q_end}_plot_data.csv",
+        mime="text/csv"
+    )
+
+st.markdown("---")
+st.caption("Yellow accepted background + lightblue ±band band (user-set). English titles; robust DB; ALL-sheets ingest; 30-min kWh→kW; 3h average forward-filled.")
+
+
+
+# --- 3D View (Experimental) ---
+st.markdown("---")
+st.subheader("3D View (Experimental)")
+
+enable_3d = st.checkbox("Enable 3D visualization", value=False, help="Plotly interactive 3D view (rotate, zoom with mouse)")
+
+if enable_3d:
+    try:
+        import plotly.graph_objects as go
+        import numpy as np
+
+        if 'df' not in locals():
+            st.warning("No plotted data available yet. Please run a query above to load data.")
+        else:
+            df3 = df.copy().reset_index().rename(columns={"ts": "timestamp"})
+            df3['date'] = pd.to_datetime(df3['timestamp']).dt.date
+            df3['time_minutes'] = pd.to_datetime(df3['timestamp']).dt.hour * 60 + pd.to_datetime(df3['timestamp']).dt.minute
+
+            # Sort and build date index mapping
+            dates_sorted = sorted(df3['date'].unique())
+            date_to_idx = {d:i for i,d in enumerate(dates_sorted)}
+            df3['date_idx'] = df3['date'].map(date_to_idx)
+
+            # UI controls
+            zlabel = "Date"
+            y_option = st.selectbox(
+                "Y-axis (kW) value",
+                ["consumption_kW", "avg_kW_filled"],
+                index=0,
+                help="Select which metric to display on Y (kW). Z is the date index."
+            )
+            plot_type = st.radio(
+                "Plot type",
+                ["Lines by day", "Surface (time × date)"],
+                index=0,
+                horizontal=True
+            )
+
+            if plot_type == "Lines by day":
+                fig = go.Figure()
+                for d in dates_sorted:
+                    dsub = df3[df3['date'] == d].sort_values('time_minutes')
+                    fig.add_trace(go.Scatter3d(
+                        x=dsub['time_minutes'],          # X: time of day (min)
+                        y=dsub[y_option],                # Y: kW
+                        z=dsub['date_idx'],              # Z: date index
+                        mode='lines',
+                        name=str(d),
+                        line=dict(width=3)
+                    ))
+                fig.update_layout(
+                    scene=dict(
+                        xaxis_title="Time of Day (min)",
+                        yaxis_title=f"{y_option} (kW)",
+                        zaxis=dict(
+                            title=zlabel,
+                            tickmode='array',
+                            tickvals=list(range(len(dates_sorted))),
+                            ticktext=[str(d) for d in dates_sorted]
+                        ),
+                    ),
+                    height=700,
+                    margin=dict(l=0,r=0,b=0,t=30),
+                    title=f"{query_site} - 3D Lines ({y_option} vs Time, Z=Date)"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            else:
+                # Surface: rows = date_idx, cols = time_minutes
+                pivot = df3.pivot_table(index='date_idx', columns='time_minutes', values=y_option, aggfunc='mean')
+                pivot = pivot.sort_index(axis=0).sort_index(axis=1)
+                # Interpolate along time, then along date index
+                pivot = pivot.interpolate(method='linear', axis=1).interpolate(method='linear', axis=0)
+                pivot = pivot.fillna(method='bfill', axis=1).fillna(method='ffill', axis=1).fillna(method='bfill', axis=0).fillna(method='ffill', axis=0)
+
+                X = pivot.columns.values        # time minutes
+                Y = pivot.index.values          # date indices
+                Z = pivot.values                # kW values
+
+                figsurf = go.Figure(data=[go.Surface(x=X, y=Y, z=Z)])
+                figsurf.update_layout(
+                    scene=dict(
+                        xaxis_title="Time of Day (min)",
+                        yaxis=dict(
+                            title=zlabel,
+                            tickmode='array',
+                            tickvals=list(range(len(dates_sorted))),
+                            ticktext=[str(d) for d in dates_sorted]
+                        ),
+                        zaxis_title=f"{y_option} (kW)"
+                    ),
+                    height=750,
+                    margin=dict(l=0,r=0,b=0,t=30),
+                    title=f"{query_site} - 3D Surface ({y_option} over Time × Date)"
+                )
+                st.plotly_chart(figsurf, use_container_width=True)
+
+    except Exception as e:
+        st.error(f"3D rendering error: {e}")
+st.markdown("---")
