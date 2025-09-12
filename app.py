@@ -148,9 +148,9 @@ if enable_3d:
 
             # === UI controls ===
             xlabel = "Date"
-            zlabel = "Time of Day (min)"
-            y_option = st.selectbox(
-                "Y-axis (kW) value",
+            ylabel = "Time of Day (min)"
+            z_option = st.selectbox(
+                "Z-axis (kW) value",
                 ["consumption_kW", "avg_kW_filled"],
                 index=0,
                 help="Select which metric to display as kW (depth)."
@@ -168,25 +168,25 @@ if enable_3d:
                 az_deg = st.slider("Azimuth (°)", 0, 360, 45, step=5,
                                    help="Rotate around the vertical axis.")
             with col2:
-                elev = st.slider("Elevation (Z eye)", 0.2, 3.0, 1.2, step=0.1,
-                                 help="Height of the camera eye.")
+                elev = st.slider("Elevation (Y eye)", 0.2, 3.0, 1.2, step=0.1,
+                                 help="Height of the camera eye (along Y).")
             with col3:
                 radius = st.slider("Radius", 0.5, 4.0, 2.0, step=0.1,
                                    help="Distance from the center.")
 
             # Compute camera eye from azimuth, radius, elevation
             theta = math.radians(az_deg)
-            eye = dict(x=radius*math.cos(theta), y=radius*math.sin(theta), z=elev)
-            camera = dict(eye=eye, up=dict(x=0, y=0, z=1))
+            eye = dict(x=radius*math.cos(theta), y=elev, z=radius*math.sin(theta))
+            camera = dict(eye=eye, up=dict(x=0, y=1, z=0))
 
-            # Lines by day: for each date, draw a 3D line along time (Z) with kW as Y and date index as X
+            # Lines by day: for each date, draw a 3D line along time (Y) with kW as Z and date index as X
             fig = go.Figure()
             for d in dates_sorted:
                 dsub = df3[df3['date'] == d].sort_values('time_minutes')
                 fig.add_trace(go.Scatter3d(
-                    x=dsub['date_idx'],              # X: date index
-                    y=dsub[y_option],                # Y: kW
-                    z=dsub['time_minutes'],          # Z: time minutes (height)
+                    x=dsub['date_idx'],              # X: date index (横)
+                    y=dsub['time_minutes'],          # Y: time minutes (高さ)
+                    z=dsub[z_option],                # Z: kW (奥行)
                     mode='lines',
                     name=str(d),
                     line=dict(width=3)
@@ -199,18 +199,15 @@ if enable_3d:
                         tickvals=list(range(len(dates_sorted))),
                         ticktext=[str(d) for d in dates_sorted]
                     ),
-                    yaxis_title=f"{y_option} (kW)",
-                    zaxis_title=zlabel,
+                    yaxis_title=ylabel,
+                    zaxis_title=f"{z_option} (kW)",
                 ),
                 height=780,
                 margin=dict(l=0,r=0,b=0,t=30),
-                title=f"{query_site} - 3D Lines (X=date, Y={y_option} kW, Z=time)",
+                title=f"{query_site} - 3D Lines (X=date, Y=time, Z={z_option} kW)",
                 scene_camera=camera
             )
             st.plotly_chart(fig, use_container_width=True)
-
-            # Note: A true 3D surface with Z=time is ill-posed (multiple kW per time). Lines are most faithful for this axis mapping.
-            st.info("Surface rendering is not provided for this axis mapping (Z = time). Lines-by-day best represents the data without inverting the time→kW relation.")
 
     except Exception as e:
         st.error(f"3D rendering error: {e}")
