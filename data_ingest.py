@@ -140,7 +140,22 @@ def _normalize_timeseries(df: pd.DataFrame, site_name: str):
     df2[col_date] = pd.to_datetime(df2[col_date], errors="coerce")
     df2[col_date] = df2[col_date].ffill()
     # Parse times that may be strings like "0:30"
-    df2[col_time] = pd.to_datetime(df2[col_time].astype(str), format="%H:%M", errors="coerce").dt.time
+    # --- robust time parsing ---
+    # Excel 時刻は「文字列 '0:30'」「datetime」「シリアル(0.5=12:00)」のいずれか
+    tcol = df2[col_time]
+    t_time = pd.to_datetime(tcol, errors="coerce").dt.time  # datetime/strings first
+    # Fallback: numeric serial (fraction of day)
+    mask_num = tcol.apply(lambda x: isinstance(x, (int, float))) & tcol.notna()
+    if mask_num.any():
+        frac = tcol.where(mask_num, np.nan).astype(float)  # 0.5 = 12:00
+        secs = (frac * 24 * 3600).round().astype("Int64")
+        h = (secs // 3600).astype("Int64")
+        m = ((secs % 3600) // 60).astype("Int64")
+        # Build time strings HH:MM
+        tm_str = (h.astype(str).str.zfill(2) + ":" + m.astype(str).str.zfill(2))
+        t_time = t_time.astype(object)
+        t_time = pd.to_datetime(tm_str, format="%H:%M", errors="coerce").dt.time.where(t_time.isna(), t_time)
+    df2[col_time] = t_time
     # Build timestamp
     ts = pd.to_datetime(df2[col_date].dt.date.astype(str) + " " + df2[col_time].astype(str), errors="coerce")
     df2 = df2.assign(timestamp=ts).dropna(subset=["timestamp"])
@@ -183,11 +198,11 @@ def slugify(name: str):
     s = re.sub(r"[^\w\u3040-\u30FF\u4E00-\u9FFF]+", "_", name)
     return s.strip("_")
 
-
-import sqlite3
-from pathlib import Path
-
 def ingest_excel_to_separate_dbs(xlsx_path: str, out_dir: str, _unused=None):
+    """
+    Read TARGET_SHEETS and create one SQLite DB each under out_dir.
+    This function does NOT import from db to avoid import errors; it uses sqlite3 directly.
+    """
     SCHEMA = """
     CREATE TABLE IF NOT EXISTS timeseries (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -205,7 +220,6 @@ def ingest_excel_to_separate_dbs(xlsx_path: str, out_dir: str, _unused=None):
     """
     created = []
     Path(out_dir).mkdir(parents=True, exist_ok=True)
-
     for sh in TARGET_SHEETS:
         try:
             df = _read_timeseries_table(xlsx_path, sh)
@@ -213,20 +227,16 @@ def ingest_excel_to_separate_dbs(xlsx_path: str, out_dir: str, _unused=None):
             rows = to_rows_for_db_multi(sh, norm)
         except Exception:
             continue
-
         db_name = f"timeseries_{slugify(sh)}.db"
         db_path = str(Path(out_dir) / db_name)
-
+        # Write rows using sqlite3 directly
         with sqlite3.connect(db_path) as conn:
             conn.executescript(SCHEMA)
             conn.executemany("""
                 INSERT INTO timeseries
-                (site, ts, consumption_kWh, generation_kWh, surplus_kWh,
-                 price, avg_consumption_kWh, final_bid_ok)
+                (site, ts, consumption_kWh, generation_kWh, surplus_kWh, price, avg_consumption_kWh, final_bid_ok)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, rows)
             conn.commit()
-
-        created.append(db_path)
-
+        created.append((db_path, len(rows)))
     return created

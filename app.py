@@ -173,3 +173,21 @@ else:
 
 st.markdown("---")
 st.caption("Yellow accepted background + lightblue ±band band (user-set). English titles; robust DB; ALL-sheets ingest; 30-min kWh→kW; 3h average forward-filled.")
+
+st.markdown("---")
+with st.expander("DB Diagnostics", expanded=False):
+    import sqlite3
+    import os
+    if valid_db_selected:
+        try:
+            with sqlite3.connect(selected_db) as conn:
+                cur = conn.execute("SELECT COUNT(*), MIN(ts), MAX(ts) FROM timeseries")
+                total, min_ts, max_ts = cur.fetchone()
+                sites = [r[0] for r in conn.execute("SELECT DISTINCT site FROM timeseries ORDER BY site").fetchall()]
+            st.write(f"**DB**: {os.path.basename(selected_db)}  |  **rows**: {total}")
+            st.write(f"**ts range**: {min_ts}  →  {max_ts}")
+            st.write("**sites**:", ", ".join(sites) if sites else "(none)")
+        except Exception as e:
+            st.error(f"Diagnostics error: {e}")
+    else:
+        st.info("No valid DB selected.")
