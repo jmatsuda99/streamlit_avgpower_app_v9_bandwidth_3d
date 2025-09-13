@@ -6,6 +6,19 @@ from datetime import datetime, timedelta
 import sqlite3
 from pathlib import Path
 
+# --- Startup self-check for API contract ---
+try:
+    import db as _dbcheck
+    _required = ["query_timeseries", "ensure_db", "get_conn"]
+    _missing = [fn for fn in _required if not hasattr(_dbcheck, fn)]
+    if _missing:
+        st.warning("DB API mismatch: missing " + ", ".join(_missing))
+    APP_SELF_CHECK_PASSED = True
+except Exception as _e:
+    st.warning(f"Startup check error: {_e}")
+    APP_SELF_CHECK_PASSED = False
+
+
 from db import init_db, reset_db, query_timeseries
 from data_ingest import ingest_all_sheets
 
