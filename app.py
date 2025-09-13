@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import sqlite3
 from data_ingest import sheet_to_site
 from pathlib import Path
+import os
 
 # --- Startup self-check for API contract ---
 try:
@@ -18,7 +19,6 @@ try:
 except Exception as _e:
     st.warning(f"Startup check error: {_e}")
     APP_SELF_CHECK_PASSED = False
-
 
 from db import init_db, reset_db, query_timeseries
 from data_ingest import ingest_all_sheets
@@ -62,7 +62,6 @@ SITE_CHOICES = [
     "土岐地区地区シミュレーション (一次)",
 ]
 query_site = st.sidebar.selectbox("Site (Sheet)", options=SITE_CHOICES)
-
 
 # DB controls
 colA, colB = st.sidebar.columns(2)
@@ -180,7 +179,7 @@ st.markdown("---")
 with st.expander("DB Diagnostics", expanded=False):
     import sqlite3
 from data_ingest import sheet_to_site
-    import os
+import os
     if valid_db_selected:
         try:
             with sqlite3.connect(selected_db) as conn:
