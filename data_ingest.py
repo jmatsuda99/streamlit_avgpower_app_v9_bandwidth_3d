@@ -1,5 +1,3 @@
-
-import pandas as pd
 from typing import List, Tuple
 from db import upsert_timeseries
 
@@ -85,12 +83,7 @@ def ingest_all_sheets(file_path: str) -> int:
             upsert_timeseries(rows)
             total += len(rows)
     return total
-
-
-import pandas as pd
 from pathlib import Path
-import re
-from datetime import datetime
 
 TARGET_SHEETS = [
     "武芸川地区シミュレーション (一次)",
@@ -194,7 +187,7 @@ def to_rows_for_db_multi(site: str, df: pd.DataFrame):
     return rows
 
 def slugify(name: str):
-    import re
+
     s = re.sub(r"[^\w\u3040-\u30FF\u4E00-\u9FFF]+", "_", name)
     return s.strip("_")
 

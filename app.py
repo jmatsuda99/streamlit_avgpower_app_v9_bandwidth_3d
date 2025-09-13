@@ -6,7 +6,7 @@ import sqlite3
 import os
 from pathlib import Path
 from data_ingest import sheet_to_site, ingest_all_sheets, ingest_excel_to_separate_dbs
-import db as _dbcheck
+APP_DIR = Path(__file__).resolve().parent
 
 # --- Startup self-check for API contract ---
 try:
@@ -43,7 +43,7 @@ if uploaded:
                     st.sidebar.code(Path(p).name)
         except Exception as e:
             st.sidebar.error(f"Ingest error: {e}")
-db_files = sorted(glob.glob("timeseries_*.db"))
+db_files = sorted(APP_DIR.glob("timeseries_*.db"))
 selected_db = st.sidebar.selectbox("Select Dataset (DB)", options=(db_files if db_files else ["(no DBs found)"]))
 selected_db = str(selected_db) if selected_db else ""
 valid_db_selected = (selected_db.endswith('.db') and selected_db in db_files)
