@@ -1,84 +1,87 @@
 
-from __future__ import annotations
-from typing import List, Tuple
 import pandas as pd
-import re
-from pathlib import Path
-from datetime import datetime
-import sqlite3
+from typing import List, Tuple
+from db import upsert_timeseries
 
-import db as _db
+AVG_COL_RAW = "一時調整力\n（３時間消費量30分平均値）"
 
-APP_DIR = Path(__file__).resolve().parent
+def parse_timeseries_from_sheet(file_path: str, sheet_name: str, header_row: int = 18) -> pd.DataFrame:
+    try:
+        df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row)
+    except Exception:
+        return pd.DataFrame()
 
-def sheet_to_site(sheet_name: str) -> str:
-    s = sheet_name.strip()
-    s = re.sub(r"\s+", "_", s)
-    s = re.sub(r"[^0-9A-Za-z_\-]", "", s)
-    return s.lower()
+    if df.shape[1] < 2:
+        return pd.DataFrame()
 
-def _detect_header_row(xlsx_path: str, sheet: str, max_rows: int = 8) -> int:
-    df0 = pd.read_excel(xlsx_path, sheet_name=sheet, header=None, nrows=max_rows)
-    for i in range(min(max_rows, len(df0))):
-        row = df0.iloc[i].astype(str).str.lower().tolist()
-        if "ts" in row or "timestamp" in row or "日時" in row:
-            return i
-    return 0
+    date_col = df.columns[0]
+    time_col = df.columns[1]
 
-def parse_timeseries_from_sheet(file_path: str, sheet_name: str, header_row: int | None = None) -> pd.DataFrame:
-    if header_row is None:
-        header_row = _detect_header_row(file_path, sheet_name)
-    df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row)
-    cols = {c:str(c).strip().lower() for c in df.columns}
-    df.columns = cols.values()
-    # timestamp
-    if "ts" in df.columns:
-        df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
-    elif {"date","time"}.issubset(df.columns):
-        df["ts"] = pd.to_datetime(df["date"].astype(str) + " " + df["time"].astype(str), errors="coerce")
-    else:
-        first = next(iter(df.columns))
-        df["ts"] = pd.to_datetime(df[first], errors="coerce")
-    # numeric candidates
-    for c in ["consumption_kwh","generation_kwh","surplus_kwh","price","avg_consumption_kwh"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
+    try:
+        df["date_filled"] = pd.to_datetime(df[date_col]).ffill()
+        df["timestamp"] = pd.to_datetime(
+            df["date_filled"].astype(str) + " " + df[time_col].astype(str),
+            errors="coerce"
+        )
+    except Exception:
+        return pd.DataFrame()
+
+    col_map = {
+        "消費電気量": "consumption_kWh",
+        "発電量": "generation_kWh",
+        "余剰": "surplus_kWh",
+        "電力価格": "price",
+        AVG_COL_RAW: "avg_consumption_kWh"
+    }
+    for src, dst in col_map.items():
+        if src in df.columns:
+            df[dst] = pd.to_numeric(df[src], errors="coerce")
         else:
-            df[c] = pd.NA
-    if "final_bid_ok" not in df.columns:
+            df[dst] = pd.NA
+
+    final_cols = [c for c in df.columns if "最終入札可否" in str(c)]
+    if final_cols:
+        final_col = final_cols[0]
+        df["final_bid_ok"] = df[final_col].ffill().astype(str)
+    else:
         df["final_bid_ok"] = pd.NA
-    keep = ["ts","consumption_kwh","generation_kwh","surplus_kwh","price","avg_consumption_kwh","final_bid_ok"]
-    out = df[keep].dropna(subset=["ts"]).copy()
-    out["ts"] = out["ts"].dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    out = df[["timestamp", "consumption_kWh", "generation_kWh", "surplus_kWh", "price", "avg_consumption_kWh", "final_bid_ok"]]
+    out = out.dropna(subset=["timestamp"])
     return out
 
-def to_rows_for_db(df: pd.DataFrame, site: str) -> List[Tuple]:
+def to_rows_for_db(site: str, df: pd.DataFrame) -> List[Tuple]:
     rows = []
-    for r in df.itertuples(index=False, name=None):
-        ts, cons, gen, surp, price, avgc, ok = r
-        rows.append((ts, sheet_to_site(site), cons, gen, surp, price, avgc, int(ok) if pd.notna(ok) else None))
+    for _, r in df.iterrows():
+        ts_iso = pd.to_datetime(r["timestamp"]).isoformat()
+        rows.append((
+            site,
+            ts_iso,
+            (None if pd.isna(r["consumption_kWh"]) else float(r["consumption_kWh"])),
+            (None if pd.isna(r["generation_kWh"]) else float(r["generation_kWh"])),
+            (None if pd.isna(r["surplus_kWh"]) else float(r["surplus_kWh"])),
+            (None if pd.isna(r["price"]) else float(r["price"])),
+            (None if pd.isna(r["avg_consumption_kWh"]) else float(r["avg_consumption_kWh"])),
+            (None if pd.isna(r["final_bid_ok"]) else str(r["final_bid_ok"])),
+        ))
     return rows
 
-def ingest_all_sheets(file_path: str, db_path: str | None = None) -> int:
-    if db_path is None:
-        db_path = str(APP_DIR / "timeseries_all.db")
-    _db.init_db(db_path)
-    xls = pd.ExcelFile(file_path)
-    total = 0
-    for sh in xls.sheet_names:
-        df = parse_timeseries_from_sheet(file_path, sh)
-        rows = to_rows_for_db(df, sh)
-        total += _db.insert_rows(rows, db_path=db_path)
-    return total
+def sheet_to_site(sheet_name: str) -> str:
+    name = str(sheet_name)
+    for token in ["シミュレーション", "（一次）", "(一次)", "地区", "地区地区"]:
+        name = name.replace(token, "")
+    return name.strip(" _-（）()")
 
-def ingest_excel_to_separate_dbs(file_path: str) -> int:
+def ingest_all_sheets(file_path: str) -> int:
     xls = pd.ExcelFile(file_path)
     total = 0
     for sh in xls.sheet_names:
-        site = sheet_to_site(sh)
-        db_path = str(APP_DIR / f"timeseries_{site}.db")
-        _db.init_db(db_path)
         df = parse_timeseries_from_sheet(file_path, sh)
-        rows = to_rows_for_db(df, sh)
-        total += _db.insert_rows(rows, db_path=db_path)
+        if df.empty:
+            continue
+        site = sheet_to_site(sh) or sh
+        rows = to_rows_for_db(site, df)
+        if rows:
+            upsert_timeseries(rows)
+            total += len(rows)
     return total
