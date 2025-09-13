@@ -1,17 +1,16 @@
-
 import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import sqlite3
-from data_ingest import sheet_to_site
-from pathlib import Path
 import os
+from pathlib import Path
+from data_ingest import sheet_to_site, ingest_all_sheets, ingest_excel_to_separate_dbs
+import db as _dbcheck
 
 # --- Startup self-check for API contract ---
 try:
-    import db as _dbcheck
-    _required = ["query_timeseries", "ensure_db", "get_conn"]
+    _required = ["query_timeseries", "get_conn"]
     _missing = [fn for fn in _required if not hasattr(_dbcheck, fn)]
     if _missing:
         st.warning("DB API mismatch: missing " + ", ".join(_missing))
@@ -19,9 +18,6 @@ try:
 except Exception as _e:
     st.warning(f"Startup check error: {_e}")
     APP_SELF_CHECK_PASSED = False
-
-from db import init_db, reset_db, query_timeseries
-from data_ingest import ingest_all_sheets
 
 st.set_page_config(page_title="Average Power (kW) Viewer", layout="wide")
 st.title("Average Power (30-min) Viewer")
@@ -39,7 +35,6 @@ if uploaded:
             tmp_xlsx = Path("uploaded.xlsx")
             with open(tmp_xlsx, "wb") as f:
                 f.write(uploaded.getbuffer())
-            from data_ingest import ingest_excel_to_separate_dbs
             created = ingest_excel_to_separate_dbs(str(tmp_xlsx), ".")
             st.sidebar.success(f"Ingested into {len(created)} DBs.")
             if created:
@@ -48,8 +43,6 @@ if uploaded:
                     st.sidebar.code(Path(p).name)
         except Exception as e:
             st.sidebar.error(f"Ingest error: {e}")
-
-import glob
 db_files = sorted(glob.glob("timeseries_*.db"))
 selected_db = st.sidebar.selectbox("Select Dataset (DB)", options=(db_files if db_files else ["(no DBs found)"]))
 selected_db = str(selected_db) if selected_db else ""
@@ -177,9 +170,6 @@ st.caption("Yellow accepted background + lightblue ±band band (user-set). Engli
 
 st.markdown("---")
 with st.expander("DB Diagnostics", expanded=False):
-    import sqlite3
-from data_ingest import sheet_to_site
-import os
     if valid_db_selected:
         try:
             with sqlite3.connect(selected_db) as conn:
