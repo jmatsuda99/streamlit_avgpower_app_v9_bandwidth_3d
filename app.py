@@ -4,6 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import sqlite3
+from data_ingest import sheet_to_site
 from pathlib import Path
 
 # --- Startup self-check for API contract ---
@@ -113,7 +114,8 @@ try:
         st.warning('No valid DB selected. Please ingest the Excel and choose a DB from the sidebar.')
         rows = []
     else:
-        rows = query_timeseries(query_site, str(q_start), str(q_end), db_path=selected_db)
+        db_site = sheet_to_site(query_site) if 'sheet_to_site' in globals() else query_site
+        rows = query_timeseries(db_site, str(q_start), str(q_end), db_path=selected_db)
 except sqlite3.OperationalError as e:
     st.error("Database schema error. Click **Init DB** or **Reset DB**, then ingest the Excel again.")
     st.code(str(e))
@@ -177,6 +179,7 @@ st.caption("Yellow accepted background + lightblue ±band band (user-set). Engli
 st.markdown("---")
 with st.expander("DB Diagnostics", expanded=False):
     import sqlite3
+from data_ingest import sheet_to_site
     import os
     if valid_db_selected:
         try:
