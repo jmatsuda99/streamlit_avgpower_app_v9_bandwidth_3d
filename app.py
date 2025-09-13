@@ -1,182 +1,88 @@
+
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 from datetime import datetime, timedelta
-import sqlite3
-import os
 from pathlib import Path
+import os
+
 from data_ingest import sheet_to_site, ingest_all_sheets, ingest_excel_to_separate_dbs
-import db as _dbcheck
 from db import query_timeseries
+import db as _db
+
+st.set_page_config(page_title="AvgPower 3D", layout="wide")
 APP_DIR = Path(__file__).resolve().parent
 
-# --- Startup self-check for API contract ---
-try:
-    _required = ["query_timeseries", "get_conn"]
-    _missing = [fn for fn in _required if not hasattr(_dbcheck, fn)]
-    if _missing:
-        st.warning("DB API mismatch: missing " + ", ".join(_missing))
-    APP_SELF_CHECK_PASSED = True
-except Exception as _e:
-    st.warning(f"Startup check error: {_e}")
-    APP_SELF_CHECK_PASSED = False
-
-st.set_page_config(page_title="Average Power (kW) Viewer", layout="wide")
-st.title("Average Power (30-min) Viewer")
-
-# --- Sidebar: Upload & Ingest ALL ---
-st.sidebar.header("Data Ingest")
-uploaded = st.sidebar.file_uploader("Upload Excel (.xlsx)", type=["xlsx"])
-# === Multi-DB: ingest 4 target sheets into separate DBs and select DB ===
-st.sidebar.markdown("---")
-st.sidebar.subheader("Datasets (per-sheet DB)")
-
-if uploaded:
-    if st.sidebar.button("Ingest to 4 DBs (per sheet)"):
-        try:
-            tmp_xlsx = Path("uploaded.xlsx")
-            with open(tmp_xlsx, "wb") as f:
-                f.write(uploaded.getbuffer())
-            created = ingest_excel_to_separate_dbs(str(tmp_xlsx), ".")
-            st.sidebar.success(f"Ingested into {len(created)} DBs.")
-            if created:
-                st.sidebar.write("Created:")
-                for p in created:
-                    st.sidebar.code(Path(p).name)
-        except Exception as e:
-            st.sidebar.error(f"Ingest error: {e}")
-db_files = sorted(str(p) for p in APP_DIR.glob("timeseries_*.db"))
-selected_db = st.sidebar.selectbox("Select Dataset (DB)", options=(db_files if db_files else ["(no DBs found)"]))
-selected_db = str(selected_db) if selected_db else ""
-valid_db_selected = (selected_db.endswith('.db') and selected_db in db_files)
-
-SITE_CHOICES = [
-    "武芸川地区シミュレーション (一次)",
-    "極楽寺シミュレーション (一次)",
-    "笠神地区シミュレーション (一次)",
-    "土岐地区地区シミュレーション (一次)",
-]
-query_site = st.sidebar.selectbox("Site (Sheet)", options=SITE_CHOICES)
-
-# DB controls
+st.sidebar.header("Datasets (per-sheet DB)")
+uploaded = st.sidebar.file_uploader("Upload Excel", type=["xlsx","xlsm"], accept_multiple_files=False)
 colA, colB = st.sidebar.columns(2)
-with colA:
-    if st.button("Init DB"):
-        init_db()
-        st.success("DB initialized (tables ensured).")
-with colB:
-    if st.button("Reset DB (Drop & Recreate)"):
-        reset_db()
-        st.warning("DB reset. Please ingest again.")
+if colA.button("Ingest to 4 DBs (per sheet)", use_container_width=True, disabled=not uploaded):
+    try:
+        tmp = APP_DIR/"_tmp_ingest.xlsx"
+        with open(tmp, "wb") as f: f.write(uploaded.getbuffer())
+        n = ingest_excel_to_separate_dbs(str(tmp))
+        st.sidebar.success(f"Ingested rows: {n}")
+    except Exception as e:
+        st.sidebar.error(f"Ingest error: {e}")
+if colB.button("Ingest to 1 DB (all-in-one)", use_container_width=True, disabled=not uploaded):
+    try:
+        tmp = APP_DIR/"_tmp_ingest.xlsx"
+        with open(tmp, "wb") as f: f.write(uploaded.getbuffer())
+        n = ingest_all_sheets(str(tmp), db_path=str(APP_DIR/"timeseries_all.db"))
+        st.sidebar.success(f"Ingested rows: {n}")
+    except Exception as e:
+        st.sidebar.error(f"Ingest error: {e}")
 
-if uploaded:
-    tmp_path = f"/tmp/{uploaded.name}"
-    with open(tmp_path, "wb") as f:
-        f.write(uploaded.getbuffer())
+db_files = sorted(str(p) for p in APP_DIR.glob("timeseries_*.db"))
+selected_db = st.sidebar.selectbox("Select Dataset (DB)", options=db_files or ["(no DBs found)"])
+valid_db_selected = selected_db and selected_db.startswith(str(APP_DIR))
 
-    if st.sidebar.button("Ingest ALL Sheets into DB"):
-        init_db()
-        n = ingest_all_sheets(tmp_path)
-        st.sidebar.success(f"Ingested/updated {n} rows from ALL sheets.")
-
-# --- Plot options ---
-st.header("Plot")
-query_site = st.text_input("Site", value="武芸川")
-col1, col2 = st.columns(2)
-with col1:
-    q_start = st.date_input("Start Date", value=datetime(2024,7,1))
-with col2:
-    q_end = st.date_input("End Date (exclusive)", value=datetime(2024,7,2))
-
-show_consumption = st.checkbox("Show Consumption (kW)", value=True)
-show_avg = st.checkbox("Show Average (kW, filled)", value=True)
-show_accept_bg = st.checkbox('Highlight "Accepted" (最終入札可否=〇) blocks', value=True)
-show_avg_band = st.checkbox("Show band between Average ±X kW (inside accepted blocks)", value=True)
-
-# Band width (kW), step = 100 kW, default = 1000 kW
-band_width = st.number_input(
-    "± Band width (kW)",
-    min_value=100,
-    max_value=10000,
-    step=100,
-    value=1000
-)
-
-# --- Query & Plot ---
-try:
-    if not valid_db_selected:
-        st.warning('No valid DB selected. Please ingest the Excel and choose a DB from the sidebar.')
-        rows = []
-    else:
-        db_site = sheet_to_site(query_site) if 'sheet_to_site' in globals() else query_site
-        rows = query_timeseries(db_site, str(q_start), str(q_end), db_path=selected_db)
-except sqlite3.OperationalError as e:
-    st.error("Database schema error. Click **Init DB** or **Reset DB**, then ingest the Excel again.")
-    st.code(str(e))
-    rows = []
-
-df = pd.DataFrame(rows, columns=["ts", "consumption_kWh", "generation_kWh", "surplus_kWh", "price", "avg_consumption_kWh", "final_bid_ok"])
-
-if df.empty:
-    st.info("No data found in DB for the selected site/range. Ingest the Excel first or adjust the filters.")
+sites = []
+if valid_db_selected:
+    try:
+        import sqlite3
+        with sqlite3.connect(selected_db) as conn:
+            sites = [r[0] for r in conn.execute("SELECT DISTINCT site FROM timeseries ORDER BY site").fetchall()]
+            cur = conn.execute("SELECT MIN(ts), MAX(ts) FROM timeseries")
+            min_ts, max_ts = cur.fetchone()
+    except Exception as e:
+        st.sidebar.warning(f"Site load error: {e}")
 else:
-    df["ts"] = pd.to_datetime(df["ts"]).sort_values()
+    min_ts = max_ts = None
 
-    # kWh(30-min) -> kW
-    df["consumption_kW"] = df["consumption_kWh"] * 2.0
-    df["avg_kW_raw"] = df["avg_consumption_kWh"] * 2.0
+site_label = st.sidebar.selectbox("Site (Sheet)", options=sites or ["(no sites)"])
+q_start = st.sidebar.date_input("Start date", value=(datetime.now()-timedelta(days=30)).date())
+q_end   = st.sidebar.date_input("End date", value=datetime.now().date())
 
-    # Forward-fill the 3-hourly average across 30-min slots
-    df = df.set_index("ts").asfreq("30min")
-    df["avg_kW_filled"] = df["avg_kW_raw"].ffill()
-
-    # Plot (English title)
-    fig = plt.figure(figsize=(12,6))
-    ax = plt.gca()
-
-    # Background for accepted blocks and ±band width band
-    if show_accept_bg:
-        accept_mask = df["final_bid_ok"].astype(str) == "〇"
-        for t in df.index[accept_mask]:
-            ax.axvspan(t, t + pd.Timedelta(minutes=30), alpha=0.25, color="yellow")
-            if show_avg_band and not pd.isna(df.loc[t, "avg_kW_filled"]):
-                m = df.loc[t, "avg_kW_filled"]
-                ax.fill_between(
-                    [t, t + pd.Timedelta(minutes=30)],
-                    [m - band_width, m - band_width],
-                    [m + band_width, m + band_width],
-                    alpha=0.25,
-                    color="lightblue"
-                )
-
-    if show_consumption:
-        ax.plot(df.index, df["consumption_kW"], marker="o", linestyle="-", label="Consumption (kW)")
-    if show_avg:
-        ax.plot(df.index, df["avg_kW_filled"], marker="s", linestyle="--", label="Average Power (kW, filled)")
-
-    ax.set_title(f"{query_site} - Power Consumption (kW)")
-    ax.set_xlabel("Time")
-    ax.set_ylabel("Power (kW)")
-    ax.legend()
-    st.pyplot(fig)
-
-    st.download_button(
-        "Download Plotted Data (CSV)",
-        data=df[["consumption_kW", "avg_kW_filled", "final_bid_ok"]].to_csv(index=True).encode("utf-8"),
-        file_name=f"{query_site}_{q_start}_{q_end}_plot_data.csv",
-        mime="text/csv"
-    )
-
-st.markdown("---")
-st.caption("Yellow accepted background + lightblue ±band band (user-set). English titles; robust DB; ALL-sheets ingest; 30-min kWh→kW; 3h average forward-filled.")
+if valid_db_selected and site_label and site_label != "(no sites)":
+    db_site = sheet_to_site(site_label)
+    rows = query_timeseries(db_site, str(q_start), str(q_end + timedelta(days=1)), db_path=selected_db)
+    if rows:
+        df = pd.DataFrame(rows, columns=["ts","site","consumption_kWh","generation_kWh","surplus_kWh","price","avg_consumption_kWh","final_bid_ok"])
+        df["ts"] = pd.to_datetime(df["ts"])
+        df["hour"] = df["ts"].dt.hour + df["ts"].dt.minute/60.0
+        metric = st.selectbox("Z metric", ["consumption_kWh","generation_kWh","surplus_kWh","price","avg_consumption_kWh"], index=0)
+        x_vals = df["ts"].map(pd.Timestamp.toordinal)
+        y_vals = df["hour"]
+        z_vals = df[metric].astype(float)
+        fig = go.Figure(data=[go.Scatter3d(x=x_vals, y=y_vals, z=z_vals, mode="markers")])
+        fig.update_layout(height=600, scene=dict(
+            xaxis_title="date (ordinal)",
+            yaxis_title="hour",
+            zaxis_title=metric
+        ))
+        st.plotly_chart(fig, use_container_width=True)
+        st.dataframe(df[["ts","site",metric]].tail(100))
+    else:
+        st.info("No data found in DB for the selected site/range. Ingest the Excel first or adjust the filters.")
 
 st.markdown("---")
 with st.expander("DB Diagnostics", expanded=False):
     if valid_db_selected:
         try:
+            import sqlite3
             with sqlite3.connect(selected_db) as conn:
-                cur = conn.execute("SELECT COUNT(*), MIN(ts), MAX(ts) FROM timeseries")
-                total, min_ts, max_ts = cur.fetchone()
+                total, min_ts, max_ts = conn.execute("SELECT COUNT(*), MIN(ts), MAX(ts) FROM timeseries").fetchone()
                 sites = [r[0] for r in conn.execute("SELECT DISTINCT site FROM timeseries ORDER BY site").fetchall()]
             st.write(f"**DB**: {os.path.basename(selected_db)}  |  **rows**: {total}")
             st.write(f"**ts range**: {min_ts}  →  {max_ts}")

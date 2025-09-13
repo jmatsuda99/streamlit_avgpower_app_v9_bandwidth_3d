@@ -2,24 +2,25 @@
 import sqlite3, os
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterable, List, Tuple, Optional
 
-DB_PATH = str(Path(__file__).resolve().parent / "timeseries.db")
+APP_DIR = Path(__file__).resolve().parent
+DB_PATH = str(APP_DIR / "timeseries_all.db")
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS timeseries (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    site TEXT NOT NULL,
-    ts TEXT NOT NULL,
-    consumption_kWh REAL,
-    generation_kWh REAL,
-    surplus_kWh REAL,
-    price REAL,
-    avg_consumption_kWh REAL,
-    final_bid_ok TEXT,
-    UNIQUE(site, ts)
+SCHEMA = '''
+CREATE TABLE IF NOT EXISTS timeseries(
+  ts TEXT NOT NULL,
+  site TEXT NOT NULL,
+  consumption_kWh REAL,
+  generation_kWh REAL,
+  surplus_kWh REAL,
+  price REAL,
+  avg_consumption_kWh REAL,
+  final_bid_ok INTEGER
 );
+CREATE INDEX IF NOT EXISTS idx_ts ON timeseries(ts);
 CREATE INDEX IF NOT EXISTS idx_site_ts ON timeseries(site, ts);
-"""
+'''
 
 @contextmanager
 def get_conn(db_path: str = DB_PATH):
@@ -30,52 +31,38 @@ def get_conn(db_path: str = DB_PATH):
         conn.commit()
         conn.close()
 
-def init_db(db_path: str = DB_PATH):
+def init_db(db_path: str = DB_PATH) -> None:
     with get_conn(db_path) as conn:
-        cur = conn.cursor()
-        for stmt in SCHEMA.strip().split(";"):
-            s = stmt.strip()
-            if s:
-                cur.execute(s)
-        cur.execute("PRAGMA table_info(timeseries)")
-        cols = [row[1] for row in cur.fetchall()]
-        if "final_bid_ok" not in cols:
-            cur.execute("ALTER TABLE timeseries ADD COLUMN final_bid_ok TEXT")
+        conn.executescript(SCHEMA)
 
-def reset_db(db_path: str = DB_PATH):
-    if os.path.exists(db_path):
-        os.remove(db_path)
+def reset_db(db_path: str = DB_PATH) -> None:
+    with get_conn(db_path) as conn:
+        conn.execute("DROP TABLE IF EXISTS timeseries")
     init_db(db_path)
 
-def upsert_timeseries(rows, db_path: str = DB_PATH):
+def insert_rows(rows: Iterable[Tuple], db_path: str = DB_PATH) -> int:
+    rows = list(rows)
+    if not rows:
+        return 0
     with get_conn(db_path) as conn:
-        cur = conn.cursor()
-        cur.executemany(
-            """
-            INSERT INTO timeseries (site, ts, consumption_kWh, generation_kWh, surplus_kWh, price, avg_consumption_kWh, final_bid_ok)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(site, ts) DO UPDATE SET
-              consumption_kWh=excluded.consumption_kWh,
-              generation_kWh=excluded.generation_kWh,
-              surplus_kWh=excluded.surplus_kWh,
-              price=excluded.price,
-              avg_consumption_kWh=excluded.avg_consumption_kWh,
-              final_bid_ok=excluded.final_bid_ok
-            """,
+        conn.executemany(
+            "INSERT INTO timeseries(ts, site, consumption_kWh, generation_kWh, surplus_kWh, price, avg_consumption_kWh, final_bid_ok) VALUES(?,?,?,?,?,?,?,?)",
             rows
         )
+    return len(rows)
+
+def list_sites(db_path: str = DB_PATH) -> List[str]:
+    with get_conn(db_path) as conn:
+        cur = conn.execute("SELECT DISTINCT site FROM timeseries ORDER BY site")
+        return [r[0] for r in cur.fetchall()]
 
 def query_timeseries(site: str, start_ts: str, end_ts: str, db_path: str = DB_PATH):
+    sql = '''
+    SELECT ts, site, consumption_kWh, generation_kWh, surplus_kWh, price, avg_consumption_kWh, final_bid_ok
+    FROM timeseries
+    WHERE site = ? AND ts BETWEEN ? AND ?
+    ORDER BY ts ASC
+    '''
     with get_conn(db_path) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT ts, consumption_kWh, generation_kWh, surplus_kWh, price, avg_consumption_kWh, final_bid_ok
-            FROM timeseries
-            WHERE site=? AND ts >= ? AND ts < ?
-            ORDER BY ts ASC
-            """,
-            (site, start_ts, end_ts)
-        )
-        rows = cur.fetchall()
-    return rows
+        cur = conn.execute(sql, (site, start_ts, end_ts))
+        return cur.fetchall()
